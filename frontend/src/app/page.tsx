@@ -1,128 +1,220 @@
-"use client"
-import { useState } from "react";
+"use client";
+import { useState, useRef, useEffect } from "react";
 
 type Message = {
+  id: string;
   sender: "user" | "bot";
   text: string;
+  timestamp: Date;
 };
 
 export default function ChatClient() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<Message[]>([]);
   const [loading, setLoading] = useState(false);
+  const [isTyping, setIsTyping] = useState(false);
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages]);
+
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
 
   const sendMessage = async () => {
-    if (!input.trim()) return;
+    if (!input.trim() || loading) return;
 
-    const userMessage: Message = { sender: "user", text: input };
+    const userMessage: Message = {
+      id: Date.now().toString(),
+      sender: "user",
+      text: input,
+      timestamp: new Date(),
+    };
     setMessages((prev) => [...prev, userMessage]);
     setInput("");
     setLoading(true);
+    setIsTyping(true);
 
     try {
       const res = await fetch(`/api/chat?question=${encodeURIComponent(input)}`);
       const data = await res.json();
-      console.log(data);
-const botMessage: Message = { sender: "bot", text: data.answer };
+      
+      setIsTyping(false);
+      
+      const botMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        sender: "bot",
+        text: data.answer || "I couldn't process that request.",
+        timestamp: new Date(),
+      };
       setMessages((prev) => [...prev, botMessage]);
     } catch (err) {
-      const errorMessage: Message = { sender: "bot", text: "Error fetching response" };
+      setIsTyping(false);
+      const errorMessage: Message = {
+        id: (Date.now() + 1).toString(),
+        sender: "bot",
+        text: "Error fetching response. Please check if the backend server is running.",
+        timestamp: new Date(),
+      };
       setMessages((prev) => [...prev, errorMessage]);
     }
     setLoading(false);
   };
 
+  const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      sendMessage();
+    }
+  };
+
+  const clearChat = () => {
+    setMessages([]);
+  };
+
   return (
-    <div className="min-h-screen bg-gradient-to-b from-slate-950 via-slate-900 to-slate-950 p-4">
-      {/* Header */}
-      <div className="max-w-4xl mx-auto mb-12">
-        <h1 className="text-5xl font-bold text-white mb-2 text-center">IIT Bhilai RAG</h1>
-        <p className="text-center text-blue-300 text-lg mb-12">Built using Ollama</p>
+    <div>
+      {/* Top Bar */}
+      <div className="top-bar">
+        <div className="logo">IIT BHILAI RAG</div>
+        <div className="info-text">Powered by Ollama • Gemini Embeddings</div>
+      </div>
 
-        {/* Features Grid */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          {/* Feature 1 */}
-          <div className="backdrop-blur-xl bg-black bg-opacity-10 border border-white border-opacity-20 rounded-2xl p-6 hover:bg-opacity-15 transition">
-            <div className="w-8 h-8 bg-blue-400 bg-opacity-80 rounded-lg flex items-center justify-center mb-3">
-              <span className="text-white font-bold text-sm">🧠</span>
-            </div>
-            <h3 className="text-white font-semibold mb-2">Intelligent RAG</h3>
-            <p className="text-gray-300 text-sm">Retrieval-Augmented Generation for accurate, context-aware responses</p>
+      {/* Main Content */}
+      <div className="main-content">
+        {/* Chat Container - Main area */}
+        <div className="chat-container">
+          {/* Messages Area */}
+          <div className="messages-area">
+            {messages.length === 0 ? (
+              <div style={{ 
+                display: "flex", 
+                flexDirection: "column", 
+                alignItems: "center", 
+                justifyContent: "center", 
+                height: "100%",
+                color: "#7a7a8a",
+                textAlign: "center",
+                padding: "40px"
+              }}>
+                <div style={{ fontSize: "48px", marginBottom: "16px" }}>💬</div>
+                <h3 style={{ fontSize: "16px", marginBottom: "8px", color: "#c0c0d0" }}>Welcome to IIT Bhilai RAG</h3>
+                <p style={{ fontSize: "13px" }}>Ask me anything about IIT Bhilai</p>
+                <p style={{ fontSize: "11px", marginTop: "8px" }}>Courses • Admissions • Campus • Faculty</p>
+              </div>
+            ) : (
+              messages.map((msg) => (
+                <div key={msg.id} className={`message-row ${msg.sender}`}>
+                  <div className="message-bubble">
+                    <div className="message-header">
+                      <span>{msg.sender === "user" ? "You" : "Assistant"}</span>
+                    </div>
+                    {msg.text}
+                  </div>
+                </div>
+              ))
+            )}
+            {isTyping && (
+              <div className="message-row bot">
+                <div className="typing-indicator">
+                  <div className="dot"></div>
+                  <div className="dot"></div>
+                  <div className="dot"></div>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
           </div>
 
-          {/* Feature 2 */}
-          <div className="backdrop-blur-xl bg-black bg-opacity-10 border border-white border-opacity-20 rounded-2xl p-6 hover:bg-opacity-15 transition">
-            <div className="w-8 h-8 bg-purple-400 bg-opacity-80 rounded-lg flex items-center justify-center mb-3">
-              <span className="text-white font-bold text-sm">⚡</span>
+          {/* Input Area */}
+          <div className="input-area">
+            <div className="input-wrapper">
+              <textarea
+                ref={inputRef}
+                value={input}
+                onChange={(e) => setInput(e.target.value)}
+                onKeyDown={handleKeyDown}
+                placeholder="Ask something about IIT Bhilai..."
+                disabled={loading}
+                className="input-field"
+                rows={1}
+                style={{ resize: "none" }}
+                onInput={(e) => {
+                  const target = e.target as HTMLTextAreaElement;
+                  target.style.height = "auto";
+                  target.style.height = Math.min(target.scrollHeight, 120) + "px";
+                }}
+              />
+              <button
+                onClick={sendMessage}
+                disabled={loading || !input.trim()}
+                className="send-button"
+              >
+                {loading ? "..." : "Send"}
+              </button>
             </div>
-            <h3 className="text-white font-semibold mb-2">Fast Processing</h3>
-            <p className="text-gray-300 text-sm">Lightning-fast query responses powered by Ollama</p>
+          </div>
+        </div>
+
+        {/* Side Panel */}
+        <div className="side-panel">
+          {/* Stats Panel */}
+          <div className="panel-section">
+            <div className="panel-title">SYSTEM STATUS</div>
+            <div className="stats-grid">
+              <div className="stat-item">
+                <span className="stat-label">Model</span>
+                <span className="stat-value">Gemini 2.5 Flash</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">Embeddings</span>
+                <span className="stat-value">3072-dim</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">Chunks</span>
+                <span className="stat-value">470 indexed</span>
+              </div>
+              <div className="stat-item">
+                <span className="stat-label">Cache</span>
+                <span className="stat-value">Active ✓</span>
+              </div>
+            </div>
           </div>
 
-          {/* Feature 3 */}
-          <div className="backdrop-blur-xl bg-black bg-opacity-10 border border-white border-opacity-20 rounded-2xl p-6 hover:bg-opacity-15 transition">
-            <div className="w-8 h-8 bg-green-400 bg-opacity-80 rounded-lg flex items-center justify-center mb-3">
-              <span className="text-white font-bold text-sm">📚</span>
+          {/* Quick Actions */}
+          <div className="panel-section">
+            <div className="panel-title">QUICK QUESTIONS</div>
+            <div className="quick-actions">
+              {[
+                "What BTech programs are offered?",
+                "Tell me about PhD programs",
+                "What are the admission requirements?",
+                "List all courses in CSE",
+              ].map((q) => (
+                <button
+                  key={q}
+                  onClick={() => setInput(q)}
+                  className="quick-btn"
+                >
+                  {q}
+                </button>
+              ))}
             </div>
-            <h3 className="text-white font-semibold mb-2">Knowledge Base</h3>
-            <p className="text-gray-300 text-sm">Access comprehensive IIT Bhilai information instantly</p>
           </div>
         </div>
       </div>
 
-      {/* Chat Container */}
-      <div className="flex justify-center">
-        <div className="w-full max-w-2xl backdrop-blur-2xl bg-black bg-opacity-10 border border-white border-opacity-20 rounded-3xl shadow-2xl overflow-hidden">
-          
-          {/* Chat Area */}
-          <div className="flex flex-col h-96">
-            <div className="flex-1 overflow-y-auto p-6 space-y-4">
-              {messages.map((msg, i) => (
-                <div key={i} className={`flex ${msg.sender === "user" ? "justify-end" : "justify-start"}`}>
-                  <div className={`p-4 rounded-2xl max-w-xs backdrop-blur-lg ${
-                    msg.sender === "user"
-                      ? "bg-blue-500 bg-opacity-40 border border-blue-400 border-opacity-30 text-white"
-                      : "bg-black bg-opacity-10 border border-white border-opacity-20 text-gray-100"
-                  }`}>
-                    {msg.text}
-                  </div>
-                </div>
-              ))}
-              {loading && (
-                <div className="flex justify-start">
-                  <div className="bg-black bg-opacity-10 border border-white border-opacity-20 p-4 rounded-2xl backdrop-blur-lg">
-                    <div className="flex space-x-2">
-                      <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce"></span>
-                      <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "0.1s" }}></span>
-                      <span className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{ animationDelay: "0.2s" }}></span>
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Input Area */}
-            <div className="border-t border-white border-opacity-10 p-4 bg-black bg-opacity-5 backdrop-blur-xl">
-              <div className="flex gap-3">
-                <input
-                  type="text"
-                  className="flex-1 px-4 py-3 bg-black bg-opacity-10 border border-white border-opacity-20 rounded-xl text-white placeholder-gray-400 focus:outline-none focus:border-blue-400 focus:border-opacity-50 focus:bg-opacity-15 transition"
-                  placeholder="Ask something..."
-                  value={input}
-                  onChange={(e) => setInput(e.target.value)}
-                  onKeyDown={(e) => e.key === "Enter" && sendMessage()}
-                />
-                <button
-                  onClick={sendMessage}
-                  disabled={loading}
-                  className="px-6 py-3 bg-gradient-to-r from-blue-500 to-purple-600 hover:from-blue-600 hover:to-purple-700 disabled:opacity-50 text-white rounded-xl transition font-medium"
-                >
-                  Send
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
+      {/* Bottom Navigation */}
+      <div className="bottom-nav">
+        <div className="info-text">© 2024 IIT Bhilai RAG System</div>
+        <div className="info-text">v1.0.0 • Production Ready</div>
       </div>
     </div>
   );
