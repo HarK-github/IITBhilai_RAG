@@ -1,0 +1,267 @@
+"""
+Orchestrator with full caching integration (Exact + Semantic)
+"""
+import logging
+from datetime import datetime
+from typing import Dict, Any, Optional
+from langchain_core.prompts import ChatPromptTemplate
+
+from src.caching.enhanced_cache import ExactMatchCache, SemanticCache, EnhancedCacheManager
+from src.tools import ToolRegistry, ToolResult
+from src.ingestion import VectorStoreWrapper
+from src.core.config_loader import config
+from src.core.llm_factory import LLMFactory, EmbeddingFactory
+
+logger = logging.getLogger(__name__)
+
+
+class CachedAgentOrchestrator:
+    """Orchestrator with two-layer caching (Exact + Semantic)"""
+    
+    def __init__(self):
+        self.cache_manager = None
+        self.tool_registry = None
+        self.vector_store_wrapper = None
+        self.llm = None
+        self.embeddings = None
+        
+        self.setup_logging()
+        self.setup_components()
+        self.setup_cache()
+    
+    def setup_logging(self):
+        """Setup logging configuration"""
+        logging.basicConfig(
+            level=logging.INFO,
+            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+        )
+    
+    def setup_components(self):
+        """Initialize LLM and vector store"""
+        # Initialize LLM
+        try:
+            llm_config = config.get_llm_config()
+            self.llm = LLMFactory.create_llm(llm_config)
+            logger.info(f"LLM initialized: {llm_config['provider']}")
+        except Exception as e:
+            logger.error(f"Failed to initialize LLM: {e}")
+            self.llm = None
+        
+        # Initialize embeddings
+        try:
+            embedding_config = config.get_embedding_config()
+            self.embeddings = EmbeddingFactory.create_embeddings(embedding_config)
+            logger.info(f"Embeddings initialized: {embedding_config['provider']}")
+        except Exception as e:
+            logger.error(f"Failed to initialize embeddings: {e}")
+            self.embeddings = None
+        
+        # Initialize vector store
+        try:
+            self.vector_store_wrapper = VectorStoreWrapper(self.embeddings)
+            stats = self.vector_store_wrapper.get_collection_stats()
+            logger.info(f"Vector store connected: {stats}")
+        except Exception as e:
+            logger.error(f"Failed to initialize vector store: {e}")
+            self.vector_store_wrapper = None
+        
+        # Setup tool registry
+        self.tool_registry = ToolRegistry("config/websites.yaml")
+        if self.vector_store_wrapper:
+            self.tool_registry.set_vector_store(self.vector_store_wrapper)
+            self.tool_registry.register_all_websites()
+            logger.info(f"Registered {len(self.tool_registry.tools)} tools")
+    
+    def setup_cache(self):
+        """Setup two-layer cache system"""
+        if self.vector_store_wrapper and self.embeddings:
+            # Layer 1: Exact match cache (in-memory for now)
+            exact_cache = ExactMatchCache(redis_client=None, ttl=86400)  # 24 hours
+            
+            # Layer 2: Semantic cache
+            semantic_cache = SemanticCache(
+                vector_store=self.vector_store_wrapper.vector_store,
+                embedding_model=self.embeddings,
+                similarity_threshold=0.90  # 90% similarity threshold
+            )
+            
+            # Cache manager
+            self.cache_manager = EnhancedCacheManager(
+                config={"enabled": True},
+                exact_cache=exact_cache,
+                semantic_cache=semantic_cache
+            )
+            logger.info("✅ Two-layer cache system initialized")
+        else:
+            logger.warning("Cache not initialized - vector store or embeddings missing")
+    
+    async def query(self, question: str, use_cache: bool = True) -> Dict[str, Any]:
+        """Process query with two-layer caching"""
+        start_time = datetime.now()
+        
+        # LAYER 1 & 2: Check cache (exact + semantic)
+        if use_cache and self.cache_manager:
+            cached_result = await self.cache_manager.get(question)
+            if cached_result:
+                elapsed = (datetime.now() - start_time).total_seconds()
+                logger.info(f"✅ CACHE HIT ({cached_result.get('cache_layer', 'unknown')}) in {elapsed:.3f}s")
+                return {
+                    "answer": cached_result.get("answer", cached_result.get("response", {}).get("answer", "")),
+                    "from_cache": True,
+                    "cache_layer": cached_result.get("cache_layer", "unknown"),
+                    "processing_time": elapsed,
+                    "tools_used": cached_result.get("tools_used", []),
+                    "cached_at": cached_result.get("cached_at", "unknown")
+                }
+        
+        # CACHE MISS - Generate fresh response
+        logger.info(f"❌ CACHE MISS - Generating fresh response for: {question[:50]}...")
+        
+        # Get relevant tools
+        relevant_tools = self.tool_registry.get_relevant_tools(question, top_k=3)
+        logger.info(f"Selected {len(relevant_tools)} tools")
+        
+        # Query tools
+        tool_results = []
+        for tool in relevant_tools:
+            try:
+                result = await tool.query(question)
+                if result.content:
+                    tool_results.append(result)
+                    logger.debug(f"Tool {tool.name} returned {len(result.content)} chars")
+            except Exception as e:
+                logger.error(f"Tool {tool.name} failed: {e}")
+        
+        # Fallback to direct search
+        if not tool_results and self.vector_store_wrapper:
+            fallback = await self._direct_search(question)
+            if fallback:
+                tool_results.append(fallback)
+                logger.info("Fallback direct search provided results")
+        
+        # Generate answer
+        context = self._combine_results(tool_results)
+        answer = await self._generate_answer(question, context)
+        
+        # Prepare response
+        response = {
+            "answer": answer,
+            "from_cache": False,
+            "cache_layer": "miss",
+            "processing_time": (datetime.now() - start_time).total_seconds(),
+            "tools_used": [t.source for t in tool_results],
+            "num_sources": len(tool_results)
+        }
+        
+        # LAYER 3: Store in cache for future queries
+        if use_cache and self.cache_manager and answer and "cannot find" not in answer.lower():
+            await self.cache_manager.set(question, response)
+            logger.info(f"💾 Response cached for future queries")
+        
+        return response
+    
+    async def _direct_search(self, question: str) -> Optional[ToolResult]:
+        """Direct vector search fallback"""
+        if not self.vector_store_wrapper:
+            return None
+        
+        try:
+            results = self.vector_store_wrapper.similarity_search(question, k=3)
+            if results:
+                # Extract the actual page content from each document
+                content_parts = []
+                for doc in results:
+                    # Make sure we're getting the page_content attribute
+                    if hasattr(doc, 'page_content'):
+                        content_parts.append(doc.page_content)
+                    else:
+                        content_parts.append(str(doc))
+                content = "\n\n".join(content_parts)
+                logger.info(f"Direct search found {len(results)} results, content length: {len(content)}")
+                return ToolResult(
+                    content=content,
+                    source="vector_store",
+                    confidence=0.7,
+                    metadata={"num_results": len(results)}
+                )
+        except Exception as e:
+            logger.error(f"Direct search failed: {e}")
+        
+        return None
+    def _combine_results(self, results: list) -> str:
+        """Combine tool results"""
+        if not results:
+            return "No relevant information found in the knowledge base."
+        
+        combined = []
+        for r in results:
+            if r.content and len(r.content.strip()) > 0:
+                combined.append(f"[Source: {r.source}]\n{r.content}\n")
+        
+        return "\n---\n".join(combined) if combined else "No relevant information found."
+    
+    async def _generate_answer(self, question: str, context: str) -> str:
+        """Generate answer using LLM"""
+        if not self.llm:
+            return context[:500] if context else "LLM not available"
+        
+        try:
+            template = """You are an AI assistant for IIT Bhilai. Answer based ONLY on the context provided.
+
+CONTEXT:
+{context}
+
+QUESTION:
+{question}
+
+INSTRUCTIONS:
+- Be concise and accurate
+- Only use information from the context
+- List courses or programs clearly
+- If not found, say "I cannot find this information"
+
+ANSWER:"""
+            
+            prompt = ChatPromptTemplate.from_template(template)
+            chain = prompt | self.llm
+            
+            # Truncate context if too long
+            max_context = 3000
+            if len(context) > max_context:
+                context = context[:max_context] + "..."
+            
+            result = chain.invoke({"context": context, "question": question})
+            
+            if hasattr(result, 'content'):
+                return result.content
+            elif hasattr(result, 'text'):
+                return result.text
+            else:
+                return str(result)
+            
+        except Exception as e:
+            logger.error(f"LLM generation failed: {e}")
+            return f"Based on available documents: {context[:500]}..."
+    
+    def get_cache_stats(self) -> Dict:
+        """Get cache performance statistics"""
+        if self.cache_manager:
+            return self.cache_manager.get_stats()
+        return {"error": "Cache not initialized"}
+    
+    def get_stats(self) -> Dict:
+        """Get agent statistics"""
+        stats = {
+            "tools_available": len(self.tool_registry.tools),
+            "tools": list(self.tool_registry.tools.keys()),
+            "vector_store_available": self.vector_store_wrapper is not None,
+            "llm_available": self.llm is not None
+        }
+        
+        if self.vector_store_wrapper:
+            stats["vector_stats"] = self.vector_store_wrapper.get_collection_stats()
+        
+        if self.cache_manager:
+            stats["cache"] = self.cache_manager.get_stats()
+        
+        return stats

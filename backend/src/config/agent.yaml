@@ -1,0 +1,28 @@
+agent:
+  model: "llama3.2:3b"
+  embedding_model: "mxbai-embed-large"
+  temperature: 0.1
+  max_tokens: 1000
+  ollama_base_url: "http://localhost:11434"
+  
+routing:
+  strategy: "dynamic"  # dynamic, rule_based, hybrid
+  parallel_queries: true
+  max_websites_per_query: 3
+  fallback_to_web_search: false
+  confidence_threshold: 0.7
+  
+performance:
+  request_timeout: 30
+  max_retries: 2
+  batch_size: 50
+  
+vector_store:
+  type: "chroma"
+  persist_directory: "./chroma_langchain_db"
+  collection_name: "pdf_documents"
+  
+logging:
+  level: "INFO"
+  file: "logs/agent.log"
+  format: "json"

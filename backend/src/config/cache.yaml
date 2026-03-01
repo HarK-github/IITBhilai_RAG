@@ -1,0 +1,18 @@
+caching:
+  enabled: true
+  
+  layers:
+    exact_match:
+      enabled: true
+      backend: "memory"
+      ttl: 3600  # 1 hour
+      max_size: 1000
+      
+    semantic:
+      enabled: true
+      similarity_threshold: 0.95
+      ttl: 21600  # 6 hours
+      max_cache_entries: 500
+      
+  monitoring:
+    log_hit_rate: true

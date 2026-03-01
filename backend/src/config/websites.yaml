@@ -1,0 +1,31 @@
+websites:
+  - name: "iitb_official"
+    urls:
+      - "https://www.iitbhilai.ac.in/"
+    namespace: "iitbhilai_official"
+    refresh_schedule: "daily"
+    priority: 1
+    cache_ttl: 86400
+    enabled: true
+    description: "IIT Bhilai official website with academic info"
+    
+  - name: "iitb_courses"
+    urls:
+      - "https://www.iitbhilai.ac.in/courses"
+    namespace: "iitbhilai_courses"
+    refresh_schedule: "weekly"
+    priority: 1
+    cache_ttl: 604800
+    enabled: true
+    description: "Course offerings and curriculum"
+    
+  - name: "local_pdfs"
+    urls: []
+    namespace: "iitbhilai_pdfs"
+    local_path: "./backend"
+    file_pattern: "*.pdf"
+    refresh_schedule: "manual"
+    priority: 1
+    cache_ttl: 2592000
+    enabled: true
+    description: "Local PDF documents"
