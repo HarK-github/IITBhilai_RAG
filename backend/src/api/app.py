@@ -13,6 +13,11 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from src.core.orchestrator_with_cache import CachedAgentOrchestrator
 
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi import APIRouter
+import os
+
 # Global orchestrator instance
 orchestrator = None
 
@@ -35,21 +40,15 @@ app = FastAPI(
 # CORS for frontend
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000", "http://localhost:3001"],
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-@app.get("/")
-async def root():
-    return {
-        "service": "IIT Bhilai RAG Agent",
-        "status": "running",
-        "endpoints": ["/chat", "/stats", "/health", "/cache/stats"]
-    }
+api_router = APIRouter()
 
-@app.get("/health")
+@api_router.get("/health")
 async def health():
     if orchestrator:
         return {
@@ -58,52 +57,77 @@ async def health():
         }
     return {"status": "initializing"}
 
-@app.get("/chat")
-async def chat(question: str = Query(..., description="Your question about IIT Bhilai")):
+@api_router.get("/chat")
+async def chat(
+    question: str = Query(..., description="Your question about IIT Bhilai"),
+    provider: str | None = Query(None, description="LLM provider override (gemini, local, ollama, openai)"),
+    model: str | None = Query(None, description="Optional model override"),
+    use_cache: bool = Query(True, description="Use exact + semantic cache"),
+):
     if not orchestrator:
         return JSONResponse(status_code=503, content={"error": "Agent not ready"})
     
-    result = await orchestrator.query(question)
+    result = await orchestrator.query(question, use_cache=use_cache, provider=provider, model=model)
     return {
         "question": question,
         "answer": result["answer"],
         "processing_time": result["processing_time"],
         "from_cache": result["from_cache"],
         "cache_layer": result.get("cache_layer", "unknown"),
+        "llm_provider": result.get("llm_provider"),
+        "llm_model": result.get("llm_model"),
         "sources": result.get("tools_used", [])
     }
 
-@app.get("/stats")
+@api_router.get("/stats")
 async def stats():
     if not orchestrator:
         return {"error": "Agent not ready"}
     return orchestrator.get_stats()
 
-@app.get("/cache/stats")
+@api_router.get("/providers")
+async def providers():
+    if not orchestrator:
+        return {"error": "Agent not ready"}
+    return {
+        "active": {
+            "llm_provider": orchestrator.default_llm_config.get("provider"),
+            "llm_model": orchestrator.default_llm_config.get("model"),
+        },
+        "supported": ["gemini", "local", "ollama", "openai"],
+    }
+
+@api_router.get("/cache/stats")
 async def cache_stats():
-    if orchestrator and hasattr(orchestrator, 'exact_cache'):
-        cache_size = len(orchestrator.exact_cache.cache) if hasattr(orchestrator.exact_cache, 'cache') else 0
-        return {
-            "cache_size": cache_size,
-            "has_semantic_cache": orchestrator.semantic_cache is not None,
-            "type": "in-memory"
-        }
+    if orchestrator:
+        return orchestrator.get_cache_stats()
     return {"error": "Cache not available"}
 
-@app.delete("/cache/{question}")
+@api_router.delete("/cache/{question}")
 async def clear_cache(question: str):
-    if orchestrator and hasattr(orchestrator, 'exact_cache'):
-        key = question.lower().strip()
-        if hasattr(orchestrator.exact_cache, 'cache') and key in orchestrator.exact_cache.cache:
-            del orchestrator.exact_cache.cache[key]
-            return {"status": "cleared", "question": question}
+    if orchestrator and orchestrator.cache_manager:
+        orchestrator.cache_manager.clear_query(question)
+        return {"status": "cleared", "question": question}
     return {"status": "not_found", "question": question}
 
-@app.delete("/cache/all")
+@api_router.delete("/cache/all")
 async def clear_all_cache():
-    if orchestrator and hasattr(orchestrator, 'exact_cache'):
-        if hasattr(orchestrator.exact_cache, 'cache'):
-            count = len(orchestrator.exact_cache.cache)
-            orchestrator.exact_cache.cache.clear()
-            return {"status": "cleared", "count": count}
+    if orchestrator and orchestrator.cache_manager:
+        count = len(orchestrator.cache_manager.exact_cache.cache)
+        orchestrator.cache_manager.clear()
+        return {"status": "cleared", "count": count}
     return {"status": "error"}
+
+app.include_router(api_router, prefix="/api")
+
+# Mount frontend
+frontend_out = Path(__file__).parent.parent.parent.parent / "frontend" / "out"
+
+@app.get("/")
+async def root():
+    if (frontend_out / "index.html").exists():
+        return FileResponse(frontend_out / "index.html")
+    return {"status": "Frontend not built. Run npm run build in frontend directory."}
+
+if frontend_out.exists():
+    app.mount("/", StaticFiles(directory=str(frontend_out), html=True), name="static")
