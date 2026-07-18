@@ -25,6 +25,8 @@ class AgentOrchestrator:
         self.tool_registry = None
         self.vector_store_wrapper = None
         self.llm = None
+        self.default_llm_config = {}
+        self.llm_instances = {}
         self.embeddings = None
         
         self.setup_logging()
@@ -42,25 +44,37 @@ class AgentOrchestrator:
         """Initialize all components"""
         # Initialize LLM
         try:
-            llm_config = config.get_llm_config()
-            self.llm = LLMFactory.create_llm(llm_config)
-            logger.info(f"LLM initialized: {llm_config['provider']}")
+            self.default_llm_config = config.get_llm_config()
+            self.llm = self._get_or_create_llm(self.default_llm_config)
+            logger.info(
+                "LLM initialized: %s (%s)",
+                self.default_llm_config["provider"],
+                self.default_llm_config["model"],
+            )
         except Exception as e:
             logger.error(f"Failed to initialize LLM: {e}")
             self.llm = None
         
         # Initialize embeddings
         try:
-            embedding_config = config.get_embedding_config()
-            self.embeddings = EmbeddingFactory.create_embeddings(embedding_config)
-            logger.info(f"Embeddings initialized: {embedding_config['provider']} with model {embedding_config.get('model', 'default')}")
+            self.embedding_config = config.get_embedding_config()
+            self.embeddings = EmbeddingFactory.create_embeddings(self.embedding_config)
+            logger.info(
+                "Embeddings initialized: %s with model %s",
+                self.embedding_config["provider"],
+                self.embedding_config.get("model", "default"),
+            )
         except Exception as e:
             logger.error(f"Failed to initialize embeddings: {e}")
             self.embeddings = None
+            self.embedding_config = {}
         
         # Initialize vector store
         try:
-            self.vector_store_wrapper = VectorStoreWrapper(self.embeddings)
+            self.vector_store_wrapper = VectorStoreWrapper(
+                self.embeddings,
+                embedding_config=self.embedding_config,
+            )
             stats = self.vector_store_wrapper.get_collection_stats()
             logger.info(f"Vector store connected: {stats}")
         except Exception as e:
@@ -77,7 +91,8 @@ class AgentOrchestrator:
             )
         
         # Setup tool registry
-        self.tool_registry = ToolRegistry("config/websites.yaml")
+        websites_config = Path(__file__).resolve().parents[1] / "config" / "websites.yaml"
+        self.tool_registry = ToolRegistry(str(websites_config))
         
         # Set vector store in registry
         if self.vector_store_wrapper:
@@ -87,13 +102,29 @@ class AgentOrchestrator:
         else:
             logger.warning("No vector store available - tools not registered")
     
-    async def query(self, question: str, use_cache: bool = True) -> Dict[str, Any]:
+    def _get_or_create_llm(self, llm_config: Dict[str, Any]):
+        key = (llm_config["provider"], llm_config["model"])
+        if key not in self.llm_instances:
+            self.llm_instances[key] = LLMFactory.create_llm(llm_config)
+        return self.llm_instances[key]
+
+    async def query(
+        self,
+        question: str,
+        use_cache: bool = True,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
         """Process a user query"""
         start_time = datetime.now()
+        llm_config = config.get_llm_config(provider_override=provider, model_override=model)
+        llm = self._get_or_create_llm(llm_config)
+        provider_name = llm_config["provider"]
+        model_name = llm_config["model"]
         
         # Check cache
         if use_cache and self.cache_manager:
-            cached_answer = await self.cache_manager.get(question)
+            cached_answer = await self.cache_manager.get(question, provider_name, model_name)
             if cached_answer:
                 return {
                     "answer": cached_answer,
@@ -126,7 +157,7 @@ class AgentOrchestrator:
         
         # Generate answer
         context = self._combine_results(tool_results)
-        answer = await self._generate_answer(question, context)
+        answer = await self._generate_answer(question, context, llm)
         
         # Prepare result
         result = {
@@ -134,7 +165,9 @@ class AgentOrchestrator:
             "from_cache": False,
             "processing_time": (datetime.now() - start_time).total_seconds(),
             "tools_used": [t.source for t in tool_results],
-            "num_sources": len(tool_results)
+            "num_sources": len(tool_results),
+            "llm_provider": llm_config["provider"],
+            "llm_model": llm_config["model"]
         }
         
         # Cache successful responses (not error messages)
@@ -142,7 +175,7 @@ class AgentOrchestrator:
             await self.cache_manager.set(question, answer, {
                 "tools_used": [t.source for t in tool_results],
                 "timestamp": datetime.now().isoformat()
-            })
+            }, provider_name, model_name)
         
         return result
     async def _direct_search(self, question: str) -> Optional[ToolResult]:
@@ -181,9 +214,9 @@ class AgentOrchestrator:
         
         return "\n---\n".join(combined)
     
-    async def _generate_answer(self, question: str, context: str) -> str:
+    async def _generate_answer(self, question: str, context: str, llm) -> str:
         """Generate answer using LLM"""
-        if not self.llm:
+        if not llm:
             return context[:500] if context else "LLM not available. Please check configuration."
         
         try:
@@ -205,7 +238,7 @@ INSTRUCTIONS:
 ANSWER:"""
             
             prompt = ChatPromptTemplate.from_template(template)
-            chain = prompt | self.llm
+            chain = prompt | llm
             
             # Truncate context if too long
             max_context = 3000
@@ -232,7 +265,12 @@ ANSWER:"""
             "tools_available": len(self.tool_registry.tools),
             "tools": list(self.tool_registry.tools.keys()),
             "vector_store_available": self.vector_store_wrapper is not None,
-            "llm_available": self.llm is not None
+            "llm_available": self.llm is not None,
+            "llm_provider": self.default_llm_config.get("provider"),
+            "llm_model": self.default_llm_config.get("model"),
+            "embedding_provider": self.embedding_config.get("provider"),
+            "embedding_model": self.embedding_config.get("model"),
+            "embedding_namespace": self.vector_store_wrapper.embedding_namespace if self.vector_store_wrapper else None,
         }
         
         if self.vector_store_wrapper:

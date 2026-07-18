@@ -1,4 +1,14 @@
-langchain
-langchain-ollama
-langchain-chroma
+fastapi
+uvicorn
+python-dotenv
+pyyaml
 pandas
+langchain
+langchain-community
+langchain-text-splitters
+langchain-chroma
+langchain-ollama
+langchain-google-genai
+langchain-openai
+watchdog
+pypdf
